@@ -1,5 +1,6 @@
 // ISO 2533 Standard Atmosphere — IsaAlgorithms class
 // Implements all standard atmosphere calculations per ISO 2533:1975
+// Includes bidirectional solver: any property → altitude → all properties
 
 import { CONSTANTS, DERIVED_CONSTANTS, TEMPERATURE_LAYERS } from './constants.js'
 
@@ -10,6 +11,10 @@ export class IsaAlgorithms {
   readonly sqrt2 = Math.SQRT2
   readonly pi = Math.PI
   private _pressureLayers: number[] | null = null
+
+  // Sea-level reference values for ratio calculations
+  private readonly _mu0 = 1.4607e-5    // Dynamic viscosity at sea level
+  private readonly _a0 = 340.294       // Speed of sound at sea level
 
   // --- Altitude conversions ---
 
@@ -55,6 +60,15 @@ export class IsaAlgorithms {
 
   temperatureCelsiusFromGeopotential(geopotentialAlt: number): number {
     return this.temperatureFromGeopotential(geopotentialAlt) - 273.15
+  }
+
+  temperatureRatio(geopotentialAlt: number): number {
+    return this.temperatureFromGeopotential(geopotentialAlt) / CONSTANTS.T_n
+  }
+
+  lapseRate(geopotentialAlt: number): number {
+    const layerIndex = this.locateLowerLayer(geopotentialAlt)
+    return TEMPERATURE_LAYERS[layerIndex].B ?? 0
   }
 
   // --- Pressure (internal formulas) ---
@@ -203,13 +217,25 @@ export class IsaAlgorithms {
     return Math.sqrt(CONSTANTS.kappa * DERIVED_CONSTANTS.R * T)
   }
 
+  speedOfSoundRatio(geopotentialAlt: number): number {
+    return this.speedOfSound(geopotentialAlt) / this._a0
+  }
+
   dynamicViscosity(geopotentialAlt: number): number {
     const T = this.temperatureFromGeopotential(geopotentialAlt)
     return (1458e-9 * Math.pow(T, 1.5)) / (T + 110.4)
   }
 
+  dynamicViscosityRatio(geopotentialAlt: number): number {
+    return this.dynamicViscosity(geopotentialAlt) / this._mu0
+  }
+
   kinematicViscosity(geopotentialAlt: number): number {
     return this.dynamicViscosity(geopotentialAlt) / this.densityFromGeopotential(geopotentialAlt)
+  }
+
+  kinematicViscosityRatio(geopotentialAlt: number): number {
+    return this.kinematicViscosity(geopotentialAlt) / (this._mu0 / CONSTANTS.rho_n)
   }
 
   thermalConductivity(geopotentialAlt: number): number {
@@ -217,46 +243,317 @@ export class IsaAlgorithms {
     return (0.002648151 * Math.pow(T, 1.5)) / (T + 245.4 * Math.pow(10, -12 / T))
   }
 
-  // --- Reverse lookup (pressure → altitude) ---
+  thermalConductivityRatio(geopotentialAlt: number): number {
+    return this.thermalConductivity(geopotentialAlt) / this.thermalConductivity(0)
+  }
 
-  geopotentialFromPressureMbar(pressureMbar: number): number | undefined {
-    const layers = this.pressureLayers
-    // Approximate inversion using polynomial fits for each layer
-    // These are simplified — the full implementation uses analytical solutions
-    if (pressureMbar >= layers[2] / 100) {
-      return (3.731444 - Math.pow(pressureMbar, 0.1902631)) / 8.41728e-5
+  gravityRatio(geopotentialAlt: number): number {
+    return this.gravityAtGeopotential(geopotentialAlt) / CONSTANTS.g_n
+  }
+
+  meanMolecularWeight(geopotentialAlt: number): number {
+    // In ISO 2533 range (−2000 to 80000 m), composition is constant
+    return DERIVED_CONSTANTS.M
+  }
+
+  meanMolecularWeightRatio(geopotentialAlt: number): number {
+    return 1.0 // Constant in ISA range
+  }
+
+  molecularTemperature(geopotentialAlt: number): number {
+    return this.temperatureFromGeopotential(geopotentialAlt) * this.meanMolecularWeightRatio(geopotentialAlt)
+  }
+
+  moleVolume(geopotentialAlt: number): number {
+    const T_mol = this.molecularTemperature(geopotentialAlt)
+    const p = this.pressureFromGeopotential(geopotentialAlt)
+    return CONSTANTS.R_star * T_mol / p
+  }
+
+  // =========================================================
+  // INVERSE SOLVERS — property value → geopotential altitude
+  // =========================================================
+
+  // --- Generic bisection solver ---
+
+  private bisect(
+    fn: (H: number) => number,
+    target: number,
+    lo: number,
+    hi: number,
+    tolerance: number = 1e-7,
+    maxIter: number = 200
+  ): number {
+    let a = lo
+    let b = hi
+    let mid = a
+    // Detect monotonic direction
+    const fLo = fn(lo)
+    const fHi = fn(hi)
+    const increasing = fLo < fHi
+    for (let i = 0; i <= maxIter; i++) {
+      mid = (a + b) / 2
+      const val = fn(mid)
+      if (isNaN(val)) {
+        // Narrow toward the side that produced a valid value
+        if (Math.abs(val - fn(a)) < Math.abs(val - fn(b))) b = mid
+        else a = mid
+        continue
+      }
+      const diff = Math.abs(target - val)
+      if (diff <= tolerance) return mid
+      // target < val: if increasing, go left (b=mid); if decreasing, go right (a=mid)
+      if (target < val) {
+        if (increasing) b = mid; else a = mid
+      } else {
+        if (increasing) a = mid; else b = mid
+      }
     }
-    if (pressureMbar >= layers[3] / 100) {
-      return (3.1080387 - Math.log10(pressureMbar)) / 6.848325e-6
-    }
-    if (pressureMbar >= layers[4] / 100) {
-      const p = Math.pow(pressureMbar, 0.02927125)
-      return (1.2386515 - p) / (5.085177e-7 * p)
-    }
-    if (pressureMbar >= layers[5] / 100) {
-      const p = Math.pow(pressureMbar, 0.08195949)
-      return (1.9630052 - p) / (2.013664e-6 * p)
+    return mid
+  }
+
+  // For non-monotonic properties, search multiple altitude ranges
+  // Returns the LOWEST geopotential altitude that matches
+  private bisectMultiRange(
+    fn: (H: number) => number,
+    target: number,
+    ranges: [number, number][], // [lo, hi] per range
+    tolerance: number = 1e-7,
+    maxIter: number = 100
+  ): number | undefined {
+    for (const [lo, hi] of ranges) {
+      const valLo = fn(lo)
+      const valHi = fn(hi)
+      if (isNaN(valLo) || isNaN(valHi)) continue
+      // Check if target is in this range (with epsilon for floating-point tolerance)
+      const eps = Math.abs(target) * 1e-10 + 1e-14
+      const minVal = Math.min(valLo, valHi)
+      const maxVal = Math.max(valLo, valHi)
+      if (target < minVal - eps || target > maxVal + eps) continue
+      const result = this.bisect(fn, target, lo, hi, tolerance, maxIter)
+      if (!isNaN(result)) return result
     }
     return undefined
   }
 
-  geopotentialFromPressureMmhg(pressureMmhg: number): number | undefined {
-    const layers = this.pressureLayers
-    if (pressureMmhg >= layers[2] * 0.007500616827) {
-      return (3.532747 - Math.pow(pressureMmhg, 0.1902631)) / 7.96906e-5
-    }
-    if (pressureMmhg >= layers[3] * 0.007500616827) {
-      return (2.9831357 - Math.log10(pressureMmhg)) / 6.848325e-6
-    }
-    if (pressureMmhg >= layers[4] * 0.007500616827) {
-      const p = Math.pow(pressureMmhg, 0.02927125)
-      return (1.2282678 - p) / (5.085177e-7 * p)
-    }
-    if (pressureMmhg >= layers[5] * 0.007500616827) {
-      const p = Math.pow(pressureMmhg, 0.08195949)
-      return (1.9172753 - p) / (2.013664e-6 * p)
+  // --- Algebraic inverses ---
+
+  /** Temperature (K) → geopotential altitude. Returns lowest altitude for non-unique T. */
+  geopotentialFromTemperature(T: number): number | undefined {
+    // Temperature is non-monotonic across the full range. Search all monotonic segments.
+    // Each segment must be strictly monotonic for bisection to work.
+    const ranges: [number, number][] = [
+      [-2000, 11000],   // Troposphere: T decreasing (301.15 → 216.65)
+      [11000, 20000],   // Tropopause: T constant (216.65)
+      [20000, 32000],   // Lower stratosphere: T increasing (216.65 → 228.65)
+      [32000, 47000],   // Upper stratosphere: T increasing (228.65 → 270.65)
+      [47000, 51000],   // Stratopause: T constant (270.65)
+      [51000, 71000],   // Mesosphere: T decreasing (270.65 → 214.65)
+      [71000, 80000],   // Upper mesosphere: T decreasing (214.65 → 196.65)
+    ]
+    return this.bisectMultiRange(H => this.temperatureFromGeopotential(H), T, ranges)
+  }
+
+  /** Temperature ratio θ → geopotential altitude */
+  geopotentialFromTemperatureRatio(theta: number): number | undefined {
+    return this.geopotentialFromTemperature(theta * CONSTANTS.T_n)
+  }
+
+  /** Pressure ratio δ → geopotential altitude. Monotonically decreasing. */
+  geopotentialFromPressureRatio(delta: number): number | undefined {
+    // Use relative tolerance for small pressure ratios at high altitude
+    const tol = Math.max(1e-12, Math.abs(delta) * 1e-10)
+    return this.bisect(
+      H => this.pressureRatio(H),
+      delta,
+      -2000, 80000,
+      tol, 300
+    )
+  }
+
+  /** Pressure (Pa) → geopotential altitude */
+  geopotentialFromPressure(pressure: number): number | undefined {
+    return this.geopotentialFromPressureRatio(pressure / CONSTANTS.p_n)
+  }
+
+  /** Density ratio σ → geopotential altitude */
+  geopotentialFromDensityRatio(sigma: number): number | undefined {
+    // Density decreases monotonically with altitude
+    const tol = Math.max(1e-12, Math.abs(sigma) * 1e-10)
+    return this.bisect(
+      H => this.densityRatio(H),
+      sigma,
+      -2000, 80000,
+      tol, 300
+    )
+  }
+
+  /** Density (kg/m³) → geopotential altitude */
+  geopotentialFromDensity(density: number): number | undefined {
+    return this.geopotentialFromDensityRatio(density / CONSTANTS.rho_n)
+  }
+
+  /** Gravity → geopotential altitude. Direct algebraic inverse. */
+  geopotentialFromGravity(g: number): number | undefined {
+    // g = g_n * (r₀/(r₀+z))²  where z = geometric altitude
+    // Solve for z: z = r₀ * (1/√(g/g_n) - 1)
+    // Then convert z to H
+    if (g <= 0) return undefined
+    const z = CONSTANTS.radius * (1 / Math.sqrt(g / CONSTANTS.g_n) - 1)
+    const H = this.geopotentialAltitudeFromGeometric(z)
+    // Check if within ISA range
+    if (H < -2000 || H > 80000) return undefined
+    return H
+  }
+
+  /** Gravity ratio (g/g₀) → geopotential altitude */
+  geopotentialFromGravityRatio(ratio: number): number | undefined {
+    return this.geopotentialFromGravity(ratio * CONSTANTS.g_n)
+  }
+
+  /** Speed of sound → geopotential altitude. Non-monotonic (follows T). */
+  geopotentialFromSpeedOfSound(a: number): number | undefined {
+    // a = √(κRT), so T = a²/(κR), then solve T → H
+    const T = (a * a) / (CONSTANTS.kappa * DERIVED_CONSTANTS.R)
+    return this.geopotentialFromTemperature(T)
+  }
+
+  /** Speed of sound ratio → geopotential altitude */
+  geopotentialFromSpeedOfSoundRatio(ratio: number): number | undefined {
+    return this.geopotentialFromSpeedOfSound(ratio * this._a0)
+  }
+
+  /** Mean particle speed → geopotential altitude. Via temperature. */
+  geopotentialFromMeanParticleSpeed(v: number): number | undefined {
+    // v = 1.595769 * √(RT), so T = v²/(1.595769² * R)
+    const T = (v * v) / (1.595769 * 1.595769 * DERIVED_CONSTANTS.R)
+    return this.geopotentialFromTemperature(T)
+  }
+
+  // --- Bisection-based inverses ---
+
+  /** Dynamic viscosity → geopotential altitude. Non-monotonic (follows T). */
+  geopotentialFromDynamicViscosity(mu: number): number | undefined {
+    const ranges: [number, number][] = [
+      [-2000, 11000],
+      [11000, 20000],
+      [20000, 32000],
+      [32000, 47000],
+      [47000, 51000],
+      [51000, 71000],
+      [71000, 80000],
+    ]
+    return this.bisectMultiRange(H => this.dynamicViscosity(H), mu, ranges, 1e-14)
+  }
+
+  /** Dynamic viscosity ratio → geopotential altitude */
+  geopotentialFromDynamicViscosityRatio(ratio: number): number | undefined {
+    return this.geopotentialFromDynamicViscosity(ratio * this._mu0)
+  }
+
+  /** Kinematic viscosity → geopotential altitude. Monotonically increasing. */
+  geopotentialFromKinematicViscosity(nu: number): number | undefined {
+    return this.bisect(H => this.kinematicViscosity(H), nu, -2000, 80000, 1e-13, 300)
+  }
+
+  /** Kinematic viscosity ratio → geopotential altitude */
+  geopotentialFromKinematicViscosityRatio(ratio: number): number | undefined {
+    const nu0 = this._mu0 / CONSTANTS.rho_n
+    return this.geopotentialFromKinematicViscosity(ratio * nu0)
+  }
+
+  /** Thermal conductivity → geopotential altitude. Non-monotonic (follows T). */
+  geopotentialFromThermalConductivity(k: number): number | undefined {
+    const ranges: [number, number][] = [
+      [-2000, 11000],
+      [11000, 20000],
+      [20000, 32000],
+      [32000, 47000],
+      [47000, 51000],
+      [51000, 71000],
+      [71000, 80000],
+    ]
+    return this.bisectMultiRange(H => this.thermalConductivity(H), k, ranges, 1e-13)
+  }
+
+  /** Thermal conductivity ratio → geopotential altitude */
+  geopotentialFromThermalConductivityRatio(ratio: number): number | undefined {
+    return this.geopotentialFromThermalConductivity(ratio * this.thermalConductivity(0))
+  }
+
+  /** Pressure scale height → geopotential altitude. Non-monotonic. */
+  geopotentialFromPressureScaleHeight(Hp: number): number | undefined {
+    const ranges: [number, number][] = [
+      [-2000, 11000],
+      [11000, 20000],
+      [20000, 32000],
+      [32000, 47000],
+      [47000, 51000],
+      [51000, 71000],
+      [71000, 80000],
+    ]
+    return this.bisectMultiRange(H => this.pressureScaleHeight(H), Hp, ranges, 1e-7)
+  }
+
+  /** Air number density → geopotential altitude. Monotonically decreasing. */
+  geopotentialFromNumberDensity(n: number): number | undefined {
+    return this.bisect(H => this.airNumberDensity(H), n, -2000, 80000, 1e-11, 100)
+  }
+
+  /** Mean free path → geopotential altitude. Monotonically increasing. */
+  geopotentialFromMeanFreePath(l: number): number | undefined {
+    const tol = Math.max(1e-22, Math.abs(l) * 1e-10)
+    return this.bisect(H => this.meanFreePath(H), l, -2000, 80000, tol, 300)
+  }
+
+  /** Collision frequency → geopotential altitude. Monotonically decreasing. */
+  geopotentialFromCollisionFrequency(f: number): number | undefined {
+    return this.bisect(H => this.collisionFrequency(H), f, -2000, 80000, 1e-8, 300)
+  }
+
+  /** Mole volume → geopotential altitude */
+  geopotentialFromMoleVolume(Vm: number): number | undefined {
+    return this.bisect(H => this.moleVolume(H), Vm, -2000, 80000, 1e-8, 300)
+  }
+
+  /** Molecular temperature → geopotential altitude */
+  geopotentialFromMolecularTemperature(Tm: number): number | undefined {
+    // In ISA range, molecular temperature = temperature (constant M)
+    return this.geopotentialFromTemperature(Tm)
+  }
+
+  /** Mean molecular weight → geopotential altitude (constant in ISA range) */
+  geopotentialFromMeanMolecularWeight(M: number): number | undefined {
+    if (Math.abs(M - DERIVED_CONSTANTS.M) < 1e-6) return 0
+    return undefined // Only one value in ISA range
+  }
+
+  /** Lapse rate → geopotential altitude. Not unique (same β spans full layer). Returns layer midpoint. */
+  geopotentialFromLapseRate(beta: number): number | undefined {
+    // Find the first layer with this lapse rate
+    for (let i = 0; i < TEMPERATURE_LAYERS.length - 1; i++) {
+      const layerBeta = TEMPERATURE_LAYERS[i].B ?? 0
+      if (Math.abs(layerBeta - beta) < 1e-10) {
+        return TEMPERATURE_LAYERS[i].H
+      }
     }
     return undefined
+  }
+
+  /** Specific weight → geopotential altitude */
+  geopotentialFromSpecificWeight(gamma: number): number | undefined {
+    const tol = Math.max(1e-12, Math.abs(gamma) * 1e-10)
+    return this.bisect(H => this.specificWeight(H), gamma, -2000, 80000, tol, 300)
+  }
+
+  // --- Convenience pressure inverses (backward compat) ---
+
+  geopotentialFromPressureMbar(pressureMbar: number): number | undefined {
+    return this.geopotentialFromPressure(pressureMbar * 100)
+  }
+
+  geopotentialFromPressureMmhg(pressureMmhg: number): number | undefined {
+    return this.geopotentialFromPressure(pressureMmhg / 0.007500616827)
   }
 
   mbarToMmhg(mbar: number): number {
