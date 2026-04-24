@@ -1,0 +1,22 @@
+{
+  "name": "atmospheris",
+  "version": "0.1.0",
+  "description": "ISO 2533 Standard Atmosphere model — TypeScript/JavaScript reference implementation",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["iso-2533", "standard-atmosphere", "isa", "atmosphere", "aerospace", "aviation", "meteorology"],
+  "license": "BSD-2-Clause",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/atmospheris/atmospheris-js.git"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
