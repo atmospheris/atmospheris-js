@@ -5,18 +5,31 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["iso-2533", "standard-atmosphere", "isa", "atmosphere", "aerospace", "aviation", "meteorology"],
+  "keywords": [
+    "iso-2533",
+    "standard-atmosphere",
+    "isa",
+    "atmosphere",
+    "aerospace",
+    "aviation",
+    "meteorology"
+  ],
   "license": "BSD-2-Clause",
   "repository": {
     "type": "git",
     "url": "https://github.com/atmospheris/atmospheris-js.git"
   },
   "devDependencies": {
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.5"
   }
 }
