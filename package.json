@@ -1,7 +1,7 @@
 {
   "name": "atmospheris",
   "version": "0.1.0",
-  "description": "ISO 2533 Standard Atmosphere model — TypeScript/JavaScript reference implementation",
+  "description": "ISO 2533 Standard Atmosphere & ISO 5878 Reference Atmospheres — TypeScript/JavaScript reference implementation",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -29,6 +29,7 @@
     "url": "https://github.com/atmospheris/atmospheris-js.git"
   },
   "devDependencies": {
+    "js-yaml": "^4.1.1",
     "typescript": "^5.7.0",
     "vitest": "^4.1.5"
   }
