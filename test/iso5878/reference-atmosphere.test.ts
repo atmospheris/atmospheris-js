@@ -7,11 +7,13 @@ import * as path from 'path'
 import * as jsYaml from 'js-yaml'
 
 // YAML loader for test data
+// ISO5878_YAML_ROOT: directory containing 03-yaml/ and 04-yaml/ (sources/iso-5878-2025)
 const YAML_BASE = (() => {
   const candidates = [
-    path.resolve(__dirname, '../../../../mn/iso-5878/sources/iso-5878-2024/03-yaml'),
-    '/Users/mulgogi/src/mn/iso-5878/sources/iso-5878-2024/03-yaml',
-  ]
+    process.env.ISO5878_YAML_ROOT && path.resolve(process.env.ISO5878_YAML_ROOT, '03-yaml'),
+    path.resolve(__dirname, '../../../../mn/iso-5878/sources/iso-5878-2025/03-yaml'),
+    '/Users/mulgogi/src/mn/iso-5878/sources/iso-5878-2025/03-yaml',
+  ].filter(Boolean) as string[]
   return candidates.find(p => fs.existsSync(p)) || candidates[0]
 })()
 
