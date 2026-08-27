@@ -171,9 +171,10 @@ describe('WindObservation', () => {
 describe('cross-validation against Wind Table 1 YAML', () => {
   const yamlPath = (() => {
     const candidates = [
-      path.resolve(__dirname, '../../../../mn/iso-5878/sources/iso-5878-2024/04-yaml/table1.yaml'),
-      '/Users/mulgogi/src/mn/iso-5878/sources/iso-5878-2024/04-yaml/table1.yaml',
-    ]
+      process.env.ISO5878_YAML_ROOT && path.resolve(process.env.ISO5878_YAML_ROOT, '04-yaml/table1.yaml'),
+      path.resolve(__dirname, '../../../../mn/iso-5878/sources/iso-5878-2025/04-yaml/table1.yaml'),
+      '/Users/mulgogi/src/mn/iso-5878/sources/iso-5878-2025/04-yaml/table1.yaml',
+    ].filter(Boolean) as string[]
     return candidates.find(p => fs.existsSync(p))
   })()
 
